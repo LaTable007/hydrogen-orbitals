@@ -2,7 +2,7 @@
 
 Interactive 3D visualization of hydrogen atom orbitals built with Rust and [three-d](https://github.com/asny/three-d).
 
-https://github.com/LaTable007/hydrogen-orbitals/raw/main/Video/demo.mp4
+https://github.com/LaTable007/hydrogen-orbitals/releases/download/v1.0/demo.mp4
 
 ## Features
 
