@@ -2,40 +2,6 @@
 
 Interactive 3D visualization of hydrogen atom orbitals built with Rust and [three-d](https://github.com/asny/three-d).
 
----
-
-## Demos
-
-### Probability density |ψ|²
-
-> 60 000 points sampled by rejection sampling — viridis colormap.
-
-https://github.com/LaTable007/hydrogen-orbitals/releases/download/v1.0/demo_density.mp4
-
----
-
-### Wavefunction phase arg(ψ)
-
-> Phase rotates at ω = 1/(2n²) a.u. — full HSV colour wheel. The phase winds m times around the Z axis each period.
-
-https://github.com/LaTable007/hydrogen-orbitals/releases/download/v1.0/demo_phase.mp4
-
----
-
-### Probability current **j**
-
-> Particles physically orbit around Z. Inner particles orbit faster: v_φ = m / ρ_cyl (differential rotation). m > 0 → CCW, m < 0 → CW, m = 0 → static.
-
-https://github.com/LaTable007/hydrogen-orbitals/releases/download/v1.0/demo_current.mp4
-
----
-
-### Full overview
-
-https://github.com/LaTable007/hydrogen-orbitals/releases/download/v1.0/demo.mp4
-
----
-
 ## Features
 
 - **60 000 points** sampled via rejection sampling from the exact quantum probability density
