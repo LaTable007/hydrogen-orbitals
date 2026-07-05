@@ -209,10 +209,22 @@ fn build_instances(
     clip_phi: f32,   // radians
     clip_theta: f32, // radians
     mode: VisuMode,
+    // Time evolution: ψ(t) = ψ₀ · e^{+it/(2n²)}  →  phase offset = ω·t, ω = 2π/(T·n²)
+    anim_time: f64,  // display seconds elapsed
+    n_val: u32,
+    m_val: i32,
 ) -> Instances {
     let scale = Mat4::from_scale(point_size);
     let mut transforms = Vec::new();
     let mut colors = Vec::new();
+
+    // Display angular frequency: one full phase revolution every T_base·n² seconds.
+    // Physically: ω_n = 1/(2n²) a.u.; we rescale to human timescale.
+    const T_BASE: f64 = 4.0; // seconds per revolution for n=1
+    let omega: f32 = (2.0 * PI / (T_BASE * (n_val as f64).powi(2))) as f32;
+    let phase_offset = (omega as f64 * anim_time) as f32; // total phase advance
+
+    let m_sign = m_val.signum() as f32; // +1, 0, or -1
 
     for p in raw {
         if clip_phi > 0.01 && p.phi <= clip_phi {
@@ -227,26 +239,34 @@ fn build_instances(
                 Mat4::from_translation(p.pos) * scale,
                 viridis(p.density),
             ),
-            VisuMode::WavePhase => (
-                Mat4::from_translation(p.pos) * scale,
-                phase_color(p.phase),
-            ),
+            VisuMode::WavePhase => {
+                // Phase rotates: arg(ψ(t)) = arg(ψ₀) + ω·t
+                let phase_t = (p.phase + phase_offset).rem_euclid(2.0 * PI as f32);
+                (Mat4::from_translation(p.pos) * scale, phase_color(phase_t))
+            }
             VisuMode::ProbCurrent => {
-                // Ellipsoid elongated along the azimuthal direction φ̂ = (-sinφ, cosφ, 0)
-                // The elongation encodes |j| magnitude; colour also encodes |j|.
+                // |j| is time-independent (stationary state), but we animate a
+                // "tracer" spotlight that sweeps in the direction of actual current flow:
+                //   m > 0 → CCW,  m < 0 → CW.
+                // Bright spot at φ_spot = phase_offset / |m_sign|, moving in +m direction.
+                let flow_mod = if m_val == 0 {
+                    1.0_f32
+                } else {
+                    // cos argument = 0 at φ_spot; spot moves CCW for m>0, CW for m<0
+                    0.35 + 0.65 * (m_sign * p.phi - phase_offset).cos().abs()
+                };
+
                 let sp = p.phi.sin();
                 let cp = p.phi.cos();
-                let a = point_size * (1.0 + p.j_norm * 5.0); // long axis (azimuthal)
-                let b = point_size;                            // short axes
-                // Column-major Mat4:
-                //   col0 = φ̂ · a,  col1 = ρ̂ · b,  col2 = ẑ · b,  col3 = pos
+                let a = point_size * (1.0 + p.j_norm * 5.0);
+                let b = point_size;
                 let t = Mat4::new(
                     -sp * a,  cp * a, 0.0, 0.0,
                      cp * b,  sp * b, 0.0, 0.0,
                     0.0, 0.0, b, 0.0,
                     p.pos.x, p.pos.y, p.pos.z, 1.0,
                 );
-                (t, viridis(p.j_norm))
+                (t, viridis(p.j_norm * flow_mod))
             }
         };
         transforms.push(t);
@@ -378,6 +398,11 @@ fn main() {
     let mut prev_theta = -1.0_f32;
     let mut prev_mode = VisuMode::Density;
 
+    // Animation
+    let mut anim_time: f64 = 0.0;
+    let mut is_animating = false;
+    let mut time_speed: f32 = 1.0;
+
     // Flags
     let mut regenerate = true; // true on first frame to initialise
     let mut rebuild = false;
@@ -397,6 +422,14 @@ fn main() {
         redraw |= camera.set_viewport(frame_input.viewport);
         redraw |= control.handle_events(&mut camera, &mut frame_input.events);
 
+        // ── Advance animation clock ───────────────────────────────────────────
+        let animates_visually = is_animating && visu_mode != VisuMode::Density;
+        if animates_visually {
+            anim_time += frame_input.elapsed_time / 1000.0 * time_speed as f64;
+            rebuild = true; // rebuild colours every frame
+            redraw = true;
+        }
+
         // ── Full regeneration (new orbital) ───────────────────────────────────
         if regenerate {
             let (n, l, m, _) = ORBITALS[orbital_idx];
@@ -406,7 +439,7 @@ fn main() {
             let inst = build_instances(
                 &raw_points, ps,
                 clip_phi_deg.to_radians(), clip_theta_deg.to_radians(),
-                visu_mode,
+                visu_mode, anim_time, n, m,
             );
             point_mesh = build_point_mesh(&context, &inst);
             axes = build_axes(&context, al);
@@ -415,14 +448,14 @@ fn main() {
             redraw = true;
         }
 
-        // ── Fast rebuild (clip / mode change, no resampling) ──────────────────
+        // ── Fast rebuild (clip / mode / animation change, no resampling) ──────
         if rebuild {
-            let (n, _, _, _) = ORBITALS[orbital_idx];
+            let (n, _, m, _) = ORBITALS[orbital_idx];
             let ps = 0.15 * n as f32;
             let inst = build_instances(
                 &raw_points, ps,
                 clip_phi_deg.to_radians(), clip_theta_deg.to_radians(),
-                visu_mode,
+                visu_mode, anim_time, n, m,
             );
             point_mesh = build_point_mesh(&context, &inst);
             rebuild = false;
@@ -505,6 +538,33 @@ fn main() {
                                 ui.small("m<0: sens horaire");
                             }
                         }
+                    }
+
+                    ui.separator();
+
+                    // Animation
+                    ui.label("Animation temporelle:");
+                    ui.small("ψ(t) = ψ₀·e^{it/2n²}  (phase tourne à ω=1/2n²)");
+                    ui.horizontal(|ui| {
+                        let label = if is_animating { "⏸ Pause" } else { "▶ Play" };
+                        if ui.button(label).clicked() {
+                            is_animating = !is_animating;
+                        }
+                        if ui.button("↺ Reset").clicked() {
+                            anim_time = 0.0;
+                            rebuild = true;
+                        }
+                    });
+                    ui.add(
+                        Slider::new(&mut time_speed, 0.1_f32..=8.0)
+                            .suffix("×").text("Vitesse"),
+                    );
+                    if visu_mode == VisuMode::Density {
+                        ui.small("(densité: pas de dépendance temporelle)");
+                    } else {
+                        let (n, _, _, _) = ORBITALS[orbital_idx];
+                        let period = 4.0 * (n as f32).powi(2) / time_speed;
+                        ui.small(format!("Période ≈ {period:.1}s pour cette orbitale"));
                     }
 
                     ui.separator();
