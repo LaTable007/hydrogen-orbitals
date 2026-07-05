@@ -144,9 +144,10 @@ enum VisuMode {
 
 struct RawPoint {
     pos: Vec3,
-    phi: f32,     // [0, 2π] — used for azimuthal clipping
-    theta: f32,   // [0, π]  — used for polar clipping
-    density: f32, // normalised to [0,1] with γ-correction
+    phi: f32,     // [0, 2π] — azimuthal angle for clipping & animation
+    theta: f32,   // [0, π]  — polar angle for clipping
+    rho_cyl: f32, // √(x²+y²) — cylindrical radius, drives per-particle orbital speed
+    density: f32, // normalised [0,1] with γ-correction
     phase: f32,   // [0, 2π]
     j_norm: f32,  // |j| normalised [0,1]
 }
@@ -168,7 +169,7 @@ fn generate_raw_points(n: u32, l: i32, m: i32, num_points: usize) -> Vec<RawPoin
     }
 
     // Rejection sampling
-    let mut buf: Vec<(Vec3, f32, f32, f64, f64, f64)> = Vec::with_capacity(num_points);
+    let mut buf: Vec<(Vec3, f32, f32, f32, f64, f64, f64)> = Vec::with_capacity(num_points);
     let mut attempts = 0usize;
     while buf.len() < num_points && attempts < num_points * 300 {
         attempts += 1;
@@ -178,21 +179,23 @@ fn generate_raw_points(n: u32, l: i32, m: i32, num_points: usize) -> Vec<RawPoin
         let (density, phase, j_mag) = hydrogen_values(n, l, m, x, y, z);
         if rng.r#gen::<f64>() < density / max_density {
             let r = (x * x + y * y + z * z).sqrt().max(1e-10);
+            let rho_cyl = (x * x + y * y).sqrt() as f32;
             let phi_raw = y.atan2(x);
             let phi = (if phi_raw < 0.0 { phi_raw + 2.0 * PI } else { phi_raw }) as f32;
             let theta = (z / r).clamp(-1.0, 1.0).acos() as f32;
-            buf.push((Vec3::new(x as f32, y as f32, z as f32), phi, theta, density, phase, j_mag));
+            buf.push((Vec3::new(x as f32, y as f32, z as f32), phi, rho_cyl, theta, density, phase, j_mag));
         }
     }
 
     // Normalise density and j over the sampled set
-    let max_d = buf.iter().map(|p| p.3).fold(0.0_f64, f64::max).max(1e-40);
-    let max_j = buf.iter().map(|p| p.5).fold(0.0_f64, f64::max).max(1e-40);
+    let max_d = buf.iter().map(|p| p.4).fold(0.0_f64, f64::max).max(1e-40);
+    let max_j = buf.iter().map(|p| p.6).fold(0.0_f64, f64::max).max(1e-40);
 
     buf.into_iter()
-        .map(|(pos, phi, theta, d, phase, j)| RawPoint {
+        .map(|(pos, phi, rho_cyl, theta, d, phase, j)| RawPoint {
             pos,
             phi,
+            rho_cyl,
             theta,
             density: (d / max_d).powf(0.35) as f32,
             phase: phase as f32,
@@ -218,9 +221,10 @@ fn build_instances(
     let mut transforms = Vec::new();
     let mut colors = Vec::new();
 
-    // Display angular frequency: one full phase revolution every T_base·n² seconds.
-    // Physically: ω_n = 1/(2n²) a.u.; we rescale to human timescale.
-    const T_BASE: f64 = 4.0; // seconds per revolution for n=1
+    // T_BASE: display seconds for one phase revolution at n=1.
+    // Physically ω_n = 1/(2n²) a.u.; here we rescale so n=1 completes in T_BASE seconds.
+    // Also used for per-particle orbital speed in ProbCurrent mode.
+    const T_BASE: f64 = 4.0;
     let omega: f32 = (2.0 * PI / (T_BASE * (n_val as f64).powi(2))) as f32;
     let phase_offset = (omega as f64 * anim_time) as f32; // total phase advance
 
@@ -245,28 +249,29 @@ fn build_instances(
                 (Mat4::from_translation(p.pos) * scale, phase_color(phase_t))
             }
             VisuMode::ProbCurrent => {
-                // |j| is time-independent (stationary state), but we animate a
-                // "tracer" spotlight that sweeps in the direction of actual current flow:
-                //   m > 0 → CCW,  m < 0 → CW.
-                // Bright spot at φ_spot = phase_offset / |m_sign|, moving in +m direction.
-                let flow_mod = if m_val == 0 {
-                    1.0_f32
-                } else {
-                    // cos argument = 0 at φ_spot; spot moves CCW for m>0, CW for m<0
-                    0.35 + 0.65 * (m_sign * p.phi - phase_offset).cos().abs()
-                };
+                // Particles physically orbit around Z.
+                // Velocity field: v_φ = j_φ / |ψ|² = m / (r sinθ) = m / ρ_cyl  (a.u.)
+                // Display: each particle revolves at  ω_i = m_sign · (2π/T_BASE) / ρ_cyl
+                // → inner particles orbit faster (differential rotation, like a galaxy).
+                // When anim_time = 0, phi_t = phi, so positions are unchanged (static mode).
+                const DISPLAY_SPEED: f32 = 2.0 * std::f32::consts::PI / T_BASE as f32;
+                let rho = p.rho_cyl.max(0.3); // clamp to avoid singularity on Z-axis
+                let phi_t = p.phi + m_sign * DISPLAY_SPEED / rho * anim_time as f32;
 
-                let sp = p.phi.sin();
-                let cp = p.phi.cos();
+                let new_pos = Vec3::new(rho * phi_t.cos(), rho * phi_t.sin(), p.pos.z);
+
+                // Ellipsoid stays aligned with the local azimuthal direction at phi_t
+                let sp = phi_t.sin();
+                let cp = phi_t.cos();
                 let a = point_size * (1.0 + p.j_norm * 5.0);
                 let b = point_size;
                 let t = Mat4::new(
                     -sp * a,  cp * a, 0.0, 0.0,
                      cp * b,  sp * b, 0.0, 0.0,
                     0.0, 0.0, b, 0.0,
-                    p.pos.x, p.pos.y, p.pos.z, 1.0,
+                    new_pos.x, new_pos.y, new_pos.z, 1.0,
                 );
-                (t, viridis(p.j_norm * flow_mod))
+                (t, viridis(p.j_norm))
             }
         };
         transforms.push(t);
