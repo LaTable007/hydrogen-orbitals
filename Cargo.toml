@@ -5,4 +5,18 @@ edition = "2024"
 
 [dependencies]
 three-d = { version = "0.18", features = ["egui-gui"] }
+egui_plot = "0.29" # même version d'egui que three-d 0.18
 rand = "0.8"
+
+# Le sampling Monte-Carlo et le rebuild des instances sont trop lourds
+# sans optimisations : on optimise aussi le profil debug pour que
+# `cargo run` reste utilisable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
